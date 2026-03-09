@@ -16,4 +16,9 @@ const (
 	defaultAdmissionControllerTargetPort = 8000
 	// DefaultAdmissionControllerWebhookName default admission controller webhook name
 	defaultAdmissionControllerWebhookName string = "datadog-webhook"
+
+	defaultProbeEnabled                = true
+	defaultProbeNamespace              = "datadog-admission-probe-dryrun"
+	defaultProbeInterval         int32 = 60
+	defaultProbeGracePeriod      int32 = 60
 )

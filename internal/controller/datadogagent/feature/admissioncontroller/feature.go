@@ -7,10 +7,12 @@ package admissioncontroller
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -24,6 +26,8 @@ import (
 	cilium "github.com/DataDog/datadog-operator/pkg/cilium/v1"
 	"github.com/DataDog/datadog-operator/pkg/constants"
 	"github.com/DataDog/datadog-operator/pkg/images"
+	"github.com/DataDog/datadog-operator/pkg/kubernetes"
+	"github.com/DataDog/datadog-operator/pkg/kubernetes/rbac"
 )
 
 func init() {
@@ -52,6 +56,8 @@ type admissionControllerFeature struct {
 	cwsInstrumentationMode    string
 
 	kubernetesAdmissionEvents *KubernetesAdmissionEventConfig
+
+	probeConfig *ProbeConfig
 }
 
 type ValidationConfig struct {
@@ -75,6 +81,13 @@ type AgentSidecarInjectionConfig struct {
 
 type KubernetesAdmissionEventConfig struct {
 	enabled bool
+}
+
+type ProbeConfig struct {
+	enabled     bool
+	namespace   string
+	interval    int32
+	gracePeriod int32
 }
 
 func buildAdmissionControllerFeature(options *feature.Options) feature.Feature {
@@ -157,6 +170,27 @@ func (f *admissionControllerFeature) Configure(dda metav1.Object, ddaSpec *v2alp
 
 		if ac.KubernetesAdmissionEvents != nil && apiutils.BoolValue(ac.KubernetesAdmissionEvents.Enabled) {
 			f.kubernetesAdmissionEvents = &KubernetesAdmissionEventConfig{enabled: true}
+		}
+
+		f.probeConfig = &ProbeConfig{
+			enabled:     defaultProbeEnabled,
+			namespace:   defaultProbeNamespace,
+			interval:    defaultProbeInterval,
+			gracePeriod: defaultProbeGracePeriod,
+		}
+		if ac.Probe != nil {
+			if ac.Probe.Enabled != nil {
+				f.probeConfig.enabled = apiutils.BoolValue(ac.Probe.Enabled)
+			}
+			if ac.Probe.Namespace != nil && *ac.Probe.Namespace != "" {
+				f.probeConfig.namespace = *ac.Probe.Namespace
+			}
+			if ac.Probe.Interval != nil {
+				f.probeConfig.interval = *ac.Probe.Interval
+			}
+			if ac.Probe.GracePeriod != nil {
+				f.probeConfig.gracePeriod = *ac.Probe.GracePeriod
+			}
 		}
 
 		_, f.networkPolicy = constants.IsNetworkPolicyEnabled(ddaSpec)
@@ -274,6 +308,29 @@ func (f *admissionControllerFeature) ManageDependencies(managers feature.Resourc
 		return err
 	}
 
+	if f.probeConfig != nil && f.probeConfig.enabled {
+		probeNS := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: f.probeConfig.namespace,
+			},
+		}
+		if err := managers.Store().AddOrUpdate(kubernetes.NamespacesKind, probeNS); err != nil {
+			return err
+		}
+
+		probeRoleName := fmt.Sprintf("%s-probe", rbacName)
+		probeRules := []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{rbac.CoreAPIGroup},
+				Resources: []string{rbac.PodsResource},
+				Verbs:     []string{rbac.CreateVerb},
+			},
+		}
+		if err := managers.RBACManager().AddPolicyRules(f.probeConfig.namespace, probeRoleName, f.serviceAccountName, probeRules, ns); err != nil {
+			return err
+		}
+	}
+
 	if f.networkPolicy != "" {
 		policyName, podSelector := objects.GetNetworkPolicyMetadata(f.owner, v2alpha1.ClusterAgentComponentName)
 		switch f.networkPolicy {
@@ -383,6 +440,25 @@ func (f *admissionControllerFeature) ManageClusterAgent(managers feature.PodTemp
 		managers.EnvVar().AddEnvVarToContainer(apicommon.ClusterAgentContainerName, &corev1.EnvVar{
 			Name:  DDAdmissionControllerKubernetesAdmissionEventsEnabled,
 			Value: apiutils.BoolToString(&f.kubernetesAdmissionEvents.enabled),
+		})
+	}
+
+	if f.probeConfig != nil && f.probeConfig.enabled {
+		managers.EnvVar().AddEnvVarToContainer(apicommon.ClusterAgentContainerName, &corev1.EnvVar{
+			Name:  DDAdmissionControllerProbeEnabled,
+			Value: "true",
+		})
+		managers.EnvVar().AddEnvVarToContainer(apicommon.ClusterAgentContainerName, &corev1.EnvVar{
+			Name:  DDAdmissionControllerProbeNamespace,
+			Value: f.probeConfig.namespace,
+		})
+		managers.EnvVar().AddEnvVarToContainer(apicommon.ClusterAgentContainerName, &corev1.EnvVar{
+			Name:  DDAdmissionControllerProbeInterval,
+			Value: strconv.Itoa(int(f.probeConfig.interval)),
+		})
+		managers.EnvVar().AddEnvVarToContainer(apicommon.ClusterAgentContainerName, &corev1.EnvVar{
+			Name:  DDAdmissionControllerProbeGracePeriod,
+			Value: strconv.Itoa(int(f.probeConfig.gracePeriod)),
 		})
 	}
 
