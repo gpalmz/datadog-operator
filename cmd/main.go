@@ -252,7 +252,7 @@ func run(opts *options) error {
 		defer profiler.Stop()
 	}
 
-	if opts.tracingEnabled {
+	if opts.tracingEnabled || os.Getenv("DD_OPERATOR_TRACING_ENABLED") == "true" {
 		setupLog.Info("Starting datadog APM tracer")
 		tracer.Start(
 			tracer.WithService("datadog-operator"),
